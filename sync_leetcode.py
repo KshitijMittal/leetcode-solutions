@@ -11,10 +11,24 @@ if not LEETCODE_SESSION or not USERNAME:
     exit(1)
 
 GRAPHQL_URL = "https://leetcode.com/graphql/"
+
+# Create a session to handle cookies automatically
+session = requests.Session()
+session.cookies.set("LEETCODE_SESSION", LEETCODE_SESSION, domain=".leetcode.com")
+
+# Fetch CSRF token by visiting the homepage
+print("Fetching CSRF token...")
+res = session.get("https://leetcode.com/")
+csrf_token = session.cookies.get("csrftoken")
+
+if not csrf_token:
+    print("Warning: Could not retrieve CSRF token. The script might fail to fetch code.")
+
 HEADERS = {
     "Content-Type": "application/json",
-    "Cookie": f"LEETCODE_SESSION={LEETCODE_SESSION};",
     "Referer": "https://leetcode.com",
+    "Origin": "https://leetcode.com",
+    "x-csrftoken": csrf_token
 }
 
 # Language mapping to file extensions
@@ -46,9 +60,10 @@ NOTES_TEMPLATE = """# Notes
 """
 
 def graphql_request(query, variables):
-    response = requests.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=HEADERS)
+    response = session.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=HEADERS)
     if response.status_code != 200:
-        raise Exception(f"Query failed: {response.status_code}")
+        # Improved error message to see exactly what LeetCode complained about
+        raise Exception(f"Query failed: {response.status_code} - {response.text}")
     return response.json()
 
 def get_recent_submissions(limit=20):
@@ -89,7 +104,7 @@ def get_submission_code(submission_id):
       }
     }
     """
-    data = graphql_request(query, {"submissionId": submission_id})
+    data = graphql_request(query, {"submissionId": str(submission_id)})
     return data.get("data", {}).get("submissionDetails", {}).get("code", "")
 
 def clean_html(html):
