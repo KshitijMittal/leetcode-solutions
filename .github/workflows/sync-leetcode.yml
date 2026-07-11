@@ -5,15 +5,18 @@ on:
     - cron: '0 0 * * *' # Runs at 00:00 UTC every day
   workflow_dispatch: # Allows you to trigger it manually from the Actions tab
 
+permissions:
+  contents: write # Allows the bot to push commits to the repo
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4  # Updated to v4
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5  # Updated to v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
