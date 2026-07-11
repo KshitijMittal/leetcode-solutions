@@ -62,7 +62,6 @@ NOTES_TEMPLATE = """# Notes
 def graphql_request(query, variables):
     response = session.post(GRAPHQL_URL, json={"query": query, "variables": variables}, headers=HEADERS)
     if response.status_code != 200:
-        # Improved error message to see exactly what LeetCode complained about
         raise Exception(f"Query failed: {response.status_code} - {response.text}")
     return response.json()
 
@@ -97,18 +96,19 @@ def get_problem_details(title_slug):
     return data.get("data", {}).get("question", {})
 
 def get_submission_code(submission_id):
+    # Changed ID! to Int! to satisfy LeetCode's API requirements
     query = """
-    query submissionDetails($submissionId: ID!) {
+    query submissionDetails($submissionId: Int!) {
       submissionDetails(submissionId: $submissionId) {
         code
       }
     }
     """
-    data = graphql_request(query, {"submissionId": str(submission_id)})
+    # Passed as an integer
+    data = graphql_request(query, {"submissionId": int(submission_id)})
     return data.get("data", {}).get("submissionDetails", {}).get("code", "")
 
 def clean_html(html):
-    # Very basic HTML to text conversion for README
     text = re.sub('<[^<]+?>', '', html)
     return text.replace('&nbsp;', ' ').replace('&lt;', '<').replace('&gt;', '>').replace('&#39;', "'")
 
@@ -126,15 +126,12 @@ def main():
         sub_id = sub["id"]
         lang = sub["lang"]
 
-        # Check if folder already exists to avoid duplicate work
-        # A quick check to see if any folder starts with the slug or title
         if os.path.exists(slug):
             print(f"Skipping {title} (already exists).")
             continue
 
         print(f"Processing: {title}")
 
-        # Fetch details and code
         details = get_problem_details(slug)
         code = get_submission_code(sub_id)
 
@@ -147,19 +144,16 @@ def main():
         tags = [tag["name"] for tag in details["topicTags"]]
         description = clean_html(details["content"])
 
-        # Determine parent folder (use first tag, fallback to 'Misc')
         parent_folder = tags[0] if tags else "Misc"
         problem_folder = f"{q_id} {title.replace('/', '-')}"
         path = os.path.join(parent_folder, problem_folder)
 
         os.makedirs(path, exist_ok=True)
 
-        # 1. Create Solution file
         ext = LANG_EXT.get(lang, "txt")
         with open(os.path.join(path, f"solution.{ext}"), "w", encoding="utf-8") as f:
             f.write(code)
 
-        # 2. Create README.md
         readme_content = f"# {q_id}. {title}\n\n"
         readme_content += f"**Difficulty:** {difficulty}\n\n"
         readme_content += f"**Tags:** {', '.join(tags)}\n\n"
@@ -169,7 +163,6 @@ def main():
         with open(os.path.join(path, "README.md"), "w", encoding="utf-8") as f:
             f.write(readme_content)
 
-        # 3. Create notes.md
         with open(os.path.join(path, "notes.md"), "w", encoding="utf-8") as f:
             f.write(NOTES_TEMPLATE)
 
