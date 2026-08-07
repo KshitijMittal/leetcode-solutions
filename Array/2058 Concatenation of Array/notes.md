@@ -1,19 +1,19 @@
 # Notes
 
 ## Intuition
-<!-- What did you initially think about when seeing this problem? -->
+This is the simplest problem in the collection. The result array is just the input array appended to itself. Python's list concatenation with the `+` operator does exactly this in one line.
 
 ## Approach
-<!-- Outline your step-by-step approach. -->
+1. Simply return `nums + nums` — Python's `+` operator concatenates two lists, creating a new list with elements from both.
 
 ## Time Complexity
-<!-- O(?) -->
+**O(n)** — We create a new list of length 2n by copying all elements.
 
 ## Space Complexity
-<!-- O(?) -->
+**O(n)** — The output array is of size 2n (n extra space beyond the input).
 
 ## Mistakes
-<!-- Any edge cases you missed or bugs you ran into? -->
+- None — this is a straightforward problem. Just ensure the return type is correct.
 
 ## Revision Date
-<!-- Update this when you revisit the problem -->
+July 11, 2026
