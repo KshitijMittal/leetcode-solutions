@@ -45,6 +45,20 @@ Every day, a Python script runs on GitHub's servers that:
 
 Because the script checks for existing folders, it never overwrites my personal `notes.md` once I've written in them.
 
+The sync runs every 6 hours (00:00, 06:00, 12:00, 18:00 UTC) so solutions land in the repo the same day they're solved.
+
+## ⚠️ Troubleshooting
+
+If the **Sync LeetCode Solutions** Action turns **red**, it almost always means the `LEETCODE_SESSION` cookie has expired. LeetCode silently hides submissions from an invalid session, so the script fails loudly instead of pushing nothing.
+
+1. Log in to LeetCode in your browser.
+2. Open DevTools → Application → Cookies → `https://leetcode.com`.
+3. Copy the value of the `LEETCODE_SESSION` cookie.
+4. Update the secret at **Settings → Secrets and variables → Actions → LEETCODE_SESSION**.
+5. Re-run the workflow from the Actions tab (or wait for the next scheduled run).
+
+Missed solves are picked up automatically as long as they're within the ~50 most recent submissions; older ones can be recovered by re-submitting them on LeetCode.
+
 ## 🧠 My Workflow
 
 1. I solve problems directly on LeetCode.
