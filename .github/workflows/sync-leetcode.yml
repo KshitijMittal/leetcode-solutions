@@ -2,7 +2,7 @@ name: Sync LeetCode Solutions
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Runs at 00:00 UTC every day
+    - cron: '0 */6 * * *' # Runs every 6 hours so solves sync the same day
   workflow_dispatch: # Allows you to trigger it manually from the Actions tab
 
 permissions:
