@@ -1,7 +1,9 @@
 import html
+import json
 import os
 import re
 import sys
+import time
 
 import requests
 
@@ -13,6 +15,11 @@ if not LEETCODE_SESSION or not USERNAME:
     exit(1)
 
 GRAPHQL_URL = "https://leetcode.com/graphql/"
+
+# Keeps a record of already-synced submission IDs so the script can detect
+# (and warn about) submissions that fall outside the API's fetch window.
+# Committed to the repo so every Action run shares the same state.
+STATE_FILE = ".sync_state.json"
 
 # Create a session that keeps cookies (incl. CSRF token) automatically.
 session = requests.Session()
@@ -131,20 +138,116 @@ def graphql_request(query, variables):
     return data
 
 
-def get_recent_submissions(limit=20):
+def verify_username():
+    """Fail fast if the configured username doesn't resolve on LeetCode.
+
+    The profile query is public data, so it works regardless of session state.
+    A clean response means the username is valid; any error means the secret
+    is wrong.
+    """
     query = """
-    query recentAcSubmissions($username: String!, $limit: Int!) {
-      recentAcSubmissionList(username: $username, limit: $limit) {
-        id
-        title
-        titleSlug
-        timestamp
-        lang
+    query userPublicProfile($username: String!) {
+      matchedUser(username: $username) {
+        username
       }
     }
     """
-    data = graphql_request(query, {"username": USERNAME, "limit": limit})
-    return (data.get("data") or {}).get("recentAcSubmissionList") or []
+    data = graphql_request(query, {"username": USERNAME})
+    matched = (data.get("data") or {}).get("matchedUser")
+    if not matched:
+        raise Exception(
+            f"Username '{USERNAME}' was not found on LeetCode. "
+            "Check the LEETCODE_USERNAME secret."
+        )
+
+
+def fetch_recent_submissions():
+    """Fetch accepted submissions, merging two endpoints to widen the net.
+
+    - recentSubmissionList: up to 50 recent submissions of ANY status.
+    - recentAcSubmissionList: up to 20 recent accepted submissions.
+
+    LeetCode silently returns an empty list for both when the session cookie
+    is invalid, which is why we verify the session separately (see main()).
+    """
+    submissions = {}
+
+    try:
+        query = """
+        query recentSubmissionList($username: String!, $limit: Int!) {
+          recentSubmissionList(username: $username, limit: $limit) {
+            id
+            title
+            titleSlug
+            timestamp
+            statusDisplay
+            lang
+          }
+        }
+        """
+        data = graphql_request(query, {"username": USERNAME, "limit": 50})
+        for sub in (data.get("data") or {}).get("recentSubmissionList") or []:
+            if (sub.get("statusDisplay") or "") == "Accepted":
+                submissions[sub["id"]] = sub
+    except Exception as exc:
+        print(f"  recentSubmissionList query failed ({exc}); using recentAcSubmissionList only")
+
+    try:
+        query = """
+        query recentAcSubmissions($username: String!, $limit: Int!) {
+          recentAcSubmissionList(username: $username, limit: $limit) {
+            id
+            title
+            titleSlug
+            timestamp
+            lang
+          }
+        }
+        """
+        data = graphql_request(query, {"username": USERNAME, "limit": 20})
+        for sub in (data.get("data") or {}).get("recentAcSubmissionList") or []:
+            submissions[sub["id"]] = sub
+    except Exception as exc:
+        print(f"  recentAcSubmissionList query failed ({exc})")
+
+    return sorted(
+        submissions.values(),
+        key=lambda s: int(s.get("timestamp") or 0),
+        reverse=True,
+    )
+
+
+def get_submission_calendar():
+    """Per-day submission counts (UTC midnight -> count) for the past year.
+
+    This is public data and keeps working even after the session expires,
+    which lets us tell "no recent solves" apart from "session died".
+    """
+    query = """
+    query userProfileCalendar($username: String!, $year: Int) {
+      matchedUser(username: $username) {
+        userCalendar(year: $year) {
+          submissionCalendar
+        }
+      }
+    }
+    """
+    data = graphql_request(query, {"username": USERNAME})
+    user_calendar = ((data.get("data") or {}).get("matchedUser") or {}).get("userCalendar") or {}
+    raw = user_calendar.get("submissionCalendar") or "{}"
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {}
+
+
+def has_recent_calendar_activity(days=7):
+    """True if the public calendar shows any submission within `days` days."""
+    calendar = get_submission_calendar()
+    if not calendar:
+        return False
+    cutoff = time.time() - days * 86400
+    return any(int(ts) >= cutoff and count > 0 for ts, count in calendar.items())
 
 
 def get_problem_details(title_slug):
@@ -281,10 +384,33 @@ def process_submission(sub):
     return "created"
 
 
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if not isinstance(state, dict) or not isinstance(state.get("synced_submission_ids"), list):
+            raise ValueError
+        return state
+    except (OSError, ValueError):
+        return {"synced_submission_ids": []}
+
+
+def save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
 def main():
+    print("Verifying LeetCode username...")
+    try:
+        verify_username()
+    except Exception as exc:
+        print(f"FAILED: {exc}")
+        return 1
+
     print("Fetching recent submissions...")
     try:
-        submissions = get_recent_submissions(20)
+        submissions = fetch_recent_submissions()
     except Exception as exc:
         # Fail fast (exit code 1 -> the GitHub Action turns red) so a stale
         # cookie is impossible to miss, instead of silently syncing nothing.
@@ -292,27 +418,60 @@ def main():
         return 1
 
     if not submissions:
-        print("No submissions found or failed to fetch.")
+        # LeetCode silently returns an EMPTY list for an expired session, even
+        # when the user solved problems recently. The submission calendar is
+        # public data, so we use it to distinguish "nothing to sync" (fine,
+        # stay green) from "session died" (fail loudly -> red Action).
+        if has_recent_calendar_activity(days=7):
+            print(
+                "FAILED: LeetCode returned no recent submissions even though your "
+                "calendar shows solves within the last 7 days. This means the "
+                "LEETCODE_SESSION cookie is expired. Update the secret "
+                "(Settings > Secrets and variables > Actions > LEETCODE_SESSION) "
+                "and re-run this workflow."
+            )
+            return 1
+        print("No recent accepted submissions to sync.")
         return 0
+
+    state = load_state()
+    synced_ids = set(state.get("synced_submission_ids", []))
+    already_synced = sum(1 for sub in submissions if str(sub.get("id")) in synced_ids)
 
     created = updated = skipped = failed = 0
     for sub in submissions:
         try:
             result = process_submission(sub)
-            if result == "updated":
-                updated += 1
-            elif result == "skipped":
-                skipped += 1
+            if result in ("created", "updated"):
+                synced_ids.add(str(sub.get("id")))
+                if result == "updated":
+                    updated += 1
+                else:
+                    created += 1
             else:
-                created += 1
+                skipped += 1
         except Exception as exc:
             failed += 1
             print(f"ERROR processing '{sub.get('title', '?')}': {exc}")
 
+    state["synced_submission_ids"] = sorted(synced_ids, key=int)
+    save_state(state)
+
     print(f"Sync complete: {created} created, {updated} updated, "
           f"{skipped} skipped, {failed} failed")
+
+    # The API only returns the ~50 most recent submissions. If the window is
+    # full, older solves may be unreachable - warn so nothing is lost silently.
+    if len(submissions) >= 50:
+        print(
+            "WARNING: the submission window is full (50+ recent submissions). "
+            "If you solved more than that since the last successful sync, the "
+            "oldest ones may be missing. Re-submitting them on LeetCode will "
+            "pull them in."
+        )
     if failed:
-        print("Some problems were skipped due to errors - check the messages above.")
+        print("Some problems failed to sync - check the errors above.")
+        return 1
     return 0
 
 
