@@ -8,8 +8,8 @@ public:
         int lengthS = s.length();
 
         for (int i = 0; i < lengthS; i++) {
-            count[s[i] - 'a'] += 1;
-            count[t[i] - 'a'] -= 1;
+            count[s[i] - 'a']++;
+            count[t[i] - 'a']--;
         }
 
         for (int i = 0; i < 26; i++) {
