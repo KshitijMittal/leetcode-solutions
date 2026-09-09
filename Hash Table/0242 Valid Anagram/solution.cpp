@@ -4,17 +4,12 @@ public:
         // Frequency array
         if (s.length() != t.length()) return false;
 
+        int count[26] = {0}; 
         int lengthS = s.length();
-        int lengthT = 0;
-
-        int count[26];
-        for (int i = 0; i < 26; i++) {
-            count[i] = 0;
-        }
 
         for (int i = 0; i < lengthS; i++) {
-            count[s[i] - 'a']++;
-            count[t[i] - 'a']--;
+            count[s[i] - 'a'] += 1;
+            count[t[i] - 'a'] -= 1;
         }
 
         for (int i = 0; i < 26; i++) {
