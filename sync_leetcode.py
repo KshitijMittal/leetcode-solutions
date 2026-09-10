@@ -406,6 +406,8 @@ def process_submission(sub):
     tags = [tag["name"] for tag in (details.get("topicTags") or [])]
     parent_folder = tags[0] if tags else "Misc"
     path = os.path.join(parent_folder, f"{q_id} {sanitize_title(title)}")
+    # Full label (question number + title) used for the commit message.
+    sub["commit_label"] = f"{q_id} {title}"
 
     ext = LANG_EXT.get(lang, "txt")
     solution_file = os.path.join(path, f"solution.{ext}")
@@ -547,7 +549,7 @@ def main():
                 commit_submission(
                     files,
                     sub.get("timestamp") or 0,
-                    sub.get("title", "Unknown"),
+                    sub.get("commit_label") or sub.get("title", "Unknown"),
                     (sub.get("lang") or "").lower(),
                 )
             else:
