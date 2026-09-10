@@ -2,10 +2,16 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
 import requests
+
+# Identity used for the per-solution commits. Overridable via env (set in the
+# workflow) so it stays in sync with the account that owns the repo.
+GIT_AUTHOR_NAME = os.environ.get("GIT_AUTHOR_NAME", "KshitijMittal")
+GIT_AUTHOR_EMAIL = os.environ.get("GIT_AUTHOR_EMAIL", "193310873+KshitijMittal@users.noreply.github.com")
 
 LEETCODE_SESSION = os.environ.get("LEETCODE_SESSION")
 USERNAME = os.environ.get("LEETCODE_USERNAME")
@@ -136,6 +142,40 @@ def graphql_request(query, variables):
         raise Exception(f"LeetCode GraphQL error: {message}")
 
     return data
+
+
+def verify_session():
+    """Fail fast when the LEETCODE_SESSION cookie is expired.
+
+    `checkedAtSubmission` is only true when the request carries a valid,
+    signed-in session. On an expired cookie LeetCode returns it as plain
+    `false` with NO error and NO empty-list signal - which is exactly the
+    silent failure mode that let runs stay green while syncing nothing.
+    """
+    query = """
+    query userStatus {
+      userStatus {
+        isSignedIn
+        checkedAtSubmission
+      }
+    }
+    """
+    try:
+        data = graphql_request(query, {})
+    except Exception as exc:
+        # Don't fail the whole run on a probe hiccup; downstream code-fetch
+        # tracking (below) still catches an expired session.
+        print(f"WARNING: session probe failed ({exc}); continuing anyway")
+        return
+    status = (data.get("data") or {}).get("userStatus") or {}
+    if not status.get("checkedAtSubmission"):
+        raise Exception(
+            "LEETCODE_SESSION cookie is expired or invalid "
+            f"(isSignedIn={bool(status.get('isSignedIn'))}). Update the secret "
+            "at Settings > Secrets and variables > Actions > LEETCODE_SESSION "
+            "with a fresh cookie value from your browser, then re-run."
+        )
+    print("Session verified (signed in and submission-checked).")
 
 
 def verify_username():
@@ -309,10 +349,42 @@ def write_readme_and_notes(path, q_id, title, tags, details):
         f.write(NOTES_TEMPLATE)
 
 
+def commit_submission(files, timestamp, title, lang):
+    """Create one git commit for a single solved problem.
+
+    Author AND committer dates are set to the LeetCode solve time (UTC), so
+    each solution lands on the contribution graph on the day it was solved,
+    even if the sync ran hours or days later.
+    """
+    when = (
+        time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(timestamp)))
+        if timestamp
+        else time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    )
+    subprocess.run(["git", "add", "--", *files], check=True)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": GIT_AUTHOR_NAME,
+        "GIT_AUTHOR_EMAIL": GIT_AUTHOR_EMAIL,
+        "GIT_COMMITTER_NAME": GIT_AUTHOR_NAME,
+        "GIT_COMMITTER_EMAIL": GIT_AUTHOR_EMAIL,
+        "GIT_AUTHOR_DATE": f"{when} +0000",
+        "GIT_COMMITTER_DATE": f"{when} +0000",
+    }
+    message = f"solve: {title}" + (f" ({lang})" if lang else "")
+    result = subprocess.run(
+        ["git", "commit", "-m", message], env=env, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise Exception(f"git commit failed: {(result.stderr or result.stdout).strip()[:300]}")
+    print(f"  committed: {message} @ {when} +0000")
+
+
 def process_submission(sub):
     """Handles one accepted submission.
 
-    Returns one of: 'created', 'updated', 'skipped'.
+    Returns (status, files) where status is 'created', 'updated' or 'skipped'
+    and files is the list of changed paths to commit (empty when skipped).
     README.md and notes.md are only ever written for brand-new problems, so
     your personal notes are never overwritten.
     """
@@ -323,12 +395,12 @@ def process_submission(sub):
 
     if not slug or not sub_id:
         print(f"Skipping submission with missing data: {title}")
-        return "skipped"
+        return "skipped", []
 
     details = get_problem_details(slug)
     if not details:
         print(f"Could not fetch details for {title}. Skipping.")
-        return "skipped"
+        return "skipped", []
 
     q_id = str(details.get("questionId", "")).zfill(4)
     tags = [tag["name"] for tag in (details.get("topicTags") or [])]
@@ -341,10 +413,19 @@ def process_submission(sub):
     print(f"Processing: {title} ({lang or 'unknown language'})")
 
     # Fetch the submitted code for this problem.
-    code = get_submission_code(sub_id)
+    try:
+        code = get_submission_code(sub_id)
+    except Exception as exc:
+        print(f"  ERROR fetching code for {title}: {exc}")
+        raise
     if not code:
-        print(f"  Could not fetch code for {title}. Skipping.")
-        return "skipped"
+        # Never silently skip this: an empty code is the classic symptom of an
+        # expired session (submission LIST is public, the CODE is not). Raising
+        # makes main() count it as failed and exit 1 -> red Action run.
+        raise Exception(
+            f"LeetCode returned empty code for submission {sub_id} ({lang or '?'}). "
+            "Usually means the LEETCODE_SESSION cookie is expired."
+        )
 
     folder_exists = os.path.exists(path)
 
@@ -358,30 +439,32 @@ def process_submission(sub):
             existing = ""
         if existing == code:
             print(f"  Up to date - skipping {title} (solution.{ext} unchanged).")
-            return "skipped"
+            return "skipped", []
         with open(solution_file, "w", encoding="utf-8") as f:
             f.write(code)
         print(f"  Updated solution.{ext} (newer submission found).")
-        return "updated"
+        return "updated", [solution_file]
 
     # Case 2: folder exists (solved before in another language, or a partial
     # folder left by a crashed run) -> add/fix files, keep notes untouched.
     if folder_exists:
+        changed = [solution_file]
         if not (os.path.exists(os.path.join(path, "README.md"))
                 and os.path.exists(os.path.join(path, "notes.md"))):
             write_readme_and_notes(path, q_id, title, tags, details)
             print("  Recreated missing README/notes.")
+            changed += [os.path.join(path, "README.md"), os.path.join(path, "notes.md")]
         print(f"  Adding {lang} solution to existing folder (README/notes untouched).")
         with open(solution_file, "w", encoding="utf-8") as f:
             f.write(code)
-        return "created"
+        return "created", changed
 
     # Case 3: brand-new problem -> full set of files.
     write_readme_and_notes(path, q_id, title, tags, details)
     with open(solution_file, "w", encoding="utf-8") as f:
         f.write(code)
     print("  Created folder + README + notes template.")
-    return "created"
+    return "created", [os.path.join(path, "README.md"), os.path.join(path, "notes.md"), solution_file]
 
 
 def load_state():
@@ -404,6 +487,13 @@ def main():
     print("Verifying LeetCode username...")
     try:
         verify_username()
+    except Exception as exc:
+        print(f"FAILED: {exc}")
+        return 1
+
+    print("Verifying LeetCode session...")
+    try:
+        verify_session()
     except Exception as exc:
         print(f"FAILED: {exc}")
         return 1
@@ -437,17 +527,29 @@ def main():
     state = load_state()
     synced_ids = set(state.get("synced_submission_ids", []))
     already_synced = sum(1 for sub in submissions if str(sub.get("id")) in synced_ids)
+    if already_synced:
+        print(f"{already_synced} of {len(submissions)} submissions were synced before - skipping them.")
 
     created = updated = skipped = failed = 0
+    dirty = False  # did this run write anything into the working tree?
     for sub in submissions:
         try:
-            result = process_submission(sub)
-            if result in ("created", "updated"):
+            status, files = process_submission(sub)
+            if status in ("created", "updated"):
                 synced_ids.add(str(sub.get("id")))
-                if result == "updated":
+                if status == "updated":
                     updated += 1
                 else:
                     created += 1
+                dirty = True
+                # One commit per solved problem, dated with the actual solve
+                # time so the contribution graph shows the real grind.
+                commit_submission(
+                    files,
+                    sub.get("timestamp") or 0,
+                    sub.get("title", "Unknown"),
+                    (sub.get("lang") or "").lower(),
+                )
             else:
                 skipped += 1
         except Exception as exc:
@@ -456,6 +558,21 @@ def main():
 
     state["synced_submission_ids"] = sorted(synced_ids, key=int)
     save_state(state)
+    if dirty:
+        subprocess.run(["git", "add", "--", STATE_FILE], check=True)
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": GIT_AUTHOR_NAME,
+            "GIT_AUTHOR_EMAIL": GIT_AUTHOR_EMAIL,
+            "GIT_COMMITTER_NAME": GIT_AUTHOR_NAME,
+            "GIT_COMMITTER_EMAIL": GIT_AUTHOR_EMAIL,
+        }
+        result = subprocess.run(
+            ["git", "commit", "-m", "chore: update sync state"],
+            env=env, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"WARNING: state-file commit failed: {(result.stderr or result.stdout).strip()[:200]}")
 
     print(f"Sync complete: {created} created, {updated} updated, "
           f"{skipped} skipped, {failed} failed")
@@ -470,7 +587,10 @@ def main():
             "pull them in."
         )
     if failed:
-        print("Some problems failed to sync - check the errors above.")
+        print(
+            f"{failed} submission(s) failed to sync - check the errors above. "
+            "They will be retried automatically on the next scheduled run."
+        )
         return 1
     return 0
 
