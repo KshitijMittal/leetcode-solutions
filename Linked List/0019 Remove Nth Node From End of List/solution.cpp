@@ -19,15 +19,21 @@ public:
             temp = temp->next;
         }
 
-        if (len == n) 
-            return head->next;
-
+        if (len == n) {
+            ListNode* nodeToDelete = head;
+            ListNode* newHead = head->next;
+            delete nodeToDelete; 
+            return newHead;
+        }
+        
         temp = head;
         for (int i = 1; i < len - n; i++) {
             temp = temp->next;
         }
 
+        ListNode* nodeToDelete = temp->next;
         temp->next = temp->next->next;
+        delete nodeToDelete;
 
         return head;
     }
